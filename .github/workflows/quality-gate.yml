@@ -36,7 +36,7 @@ jobs:
             MEDIUM, or HIGH. Also set an overall_risk for the PR as a whole.
           claude_args: |
             --allowedTools "Bash(git diff:*),Bash(git log:*),Read,Grep,Glob"
-            --json-schema {"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"number"},"severity":{"type":"string","enum":["LOW","MEDIUM","HIGH"]},"summary":{"type":"string"}},"required":["file","severity","summary"]}},"overall_risk":{"type":"string","enum":["LOW","MEDIUM","HIGH"]}},"required":["findings","overall_risk"]}
+            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"number"},"severity":{"type":"string","enum":["LOW","MEDIUM","HIGH"]},"summary":{"type":"string"}},"required":["file","severity","summary"]}},"overall_risk":{"type":"string","enum":["LOW","MEDIUM","HIGH"]}},"required":["findings","overall_risk"]}'
 
       - name: Enforce quality gate
         run: |
