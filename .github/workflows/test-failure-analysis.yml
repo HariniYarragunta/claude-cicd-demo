@@ -13,6 +13,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 jobs:
   test:
@@ -51,7 +52,7 @@ jobs:
             suggested fix. Do not modify any files.
           claude_args: |
             --allowedTools "Read,Grep,Glob"
-            --json-schema {"type":"object","properties":{"root_cause":{"type":"string"},"suggested_fix":{"type":"string"}},"required":["root_cause","suggested_fix"]}
+            --json-schema '{"type":"object","properties":{"root_cause":{"type":"string"},"suggested_fix":{"type":"string"}},"required":["root_cause","suggested_fix"]}'
 
       - name: Post analysis to PR
         if: steps.run_tests.outcome == 'failure' && github.event_name == 'pull_request'
