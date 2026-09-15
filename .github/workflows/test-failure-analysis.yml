@@ -1,0 +1,94 @@
+# Runs the test suite; on failure, asks Claude to read the failure log and
+# the relevant source to produce a root-cause analysis, then posts it as a
+# PR comment (or, for pushes with no PR, opens an issue). Requires the
+# ANTHROPIC_API_KEY secret.
+name: Test Failure Analysis
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      failed: ${{ steps.run_tests.outcome == 'failure' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run tests
+        id: run_tests
+        run: npm test > test-output.log 2>&1
+        continue-on-error: true
+
+      - name: Upload test log
+        if: steps.run_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-log
+          path: test-output.log
+
+      - name: Analyze failure with Claude
+        if: steps.run_tests.outcome == 'failure'
+        id: analysis
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            The test suite failed. Read test-output.log for the failure
+            output, then read whatever source files are relevant to explain
+            why it failed. Produce a concise root-cause analysis and a
+            suggested fix. Do not modify any files.
+          claude_args: |
+            --allowedTools "Read,Grep,Glob"
+            --json-schema {"type":"object","properties":{"root_cause":{"type":"string"},"suggested_fix":{"type":"string"}},"required":["root_cause","suggested_fix"]}
+
+      - name: Post analysis to PR
+        if: steps.run_tests.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT: ${{ steps.analysis.outputs.structured_output }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### 🔴 Test failure — automated root-cause analysis"
+            echo
+            echo "**Root cause:**"
+            echo "$OUTPUT" | jq -r '.root_cause'
+            echo
+            echo "**Suggested fix:**"
+            echo "$OUTPUT" | jq -r '.suggested_fix'
+          } > analysis-comment.md
+          gh pr comment "$PR_NUMBER" --body-file analysis-comment.md
+
+      - name: File issue for failure on main
+        if: steps.run_tests.outcome == 'failure' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT: ${{ steps.analysis.outputs.structured_output }}
+        run: |
+          {
+            echo "**Root cause:**"
+            echo "$OUTPUT" | jq -r '.root_cause'
+            echo
+            echo "**Suggested fix:**"
+            echo "$OUTPUT" | jq -r '.suggested_fix'
+            echo
+            echo "Commit: ${{ github.sha }}"
+          } > analysis-comment.md
+          gh issue create --title "Tests failing on main ($(git rev-parse --short HEAD))" \
+            --body-file analysis-comment.md --label test-failure
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1

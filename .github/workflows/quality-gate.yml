@@ -1,0 +1,56 @@
+# Runs Claude automatically on every PR (no @claude mention needed), asks it
+# to review the diff, and fails the job if any HIGH severity issue is found.
+# Requires the ANTHROPIC_API_KEY secret.
+name: Quality Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude code review
+        id: review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review only the changes introduced by this pull request
+            (compare against origin/${{ github.event.pull_request.base.ref }}).
+            Look for correctness bugs, security issues, and missing test
+            coverage. For each issue found, assign a severity of LOW,
+            MEDIUM, or HIGH. Also set an overall_risk for the PR as a whole.
+          claude_args: |
+            --allowedTools "Bash(git diff:*),Bash(git log:*),Read,Grep,Glob"
+            --json-schema {"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"number"},"severity":{"type":"string","enum":["LOW","MEDIUM","HIGH"]},"summary":{"type":"string"}},"required":["file","severity","summary"]}},"overall_risk":{"type":"string","enum":["LOW","MEDIUM","HIGH"]}},"required":["findings","overall_risk"]}
+
+      - name: Enforce quality gate
+        run: |
+          OUTPUT='${{ steps.review.outputs.structured_output }}'
+
+          {
+            echo "### Claude quality gate — overall risk: $(echo "$OUTPUT" | jq -r '.overall_risk')"
+            echo
+            echo "$OUTPUT" | jq -r '.findings[] | "- **\(.severity)** `\(.file)\(if .line then ":\(.line)" else "" end)`: \(.summary)"'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          HIGH_COUNT=$(echo "$OUTPUT" | jq '[.findings[] | select(.severity == "HIGH")] | length')
+          echo "HIGH severity findings: $HIGH_COUNT"
+
+          if [ "$HIGH_COUNT" -gt 0 ]; then
+            echo "::error::Quality gate failed: $HIGH_COUNT HIGH severity finding(s). See job summary for details."
+            exit 1
+          fi
