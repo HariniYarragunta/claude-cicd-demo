@@ -1,6 +1,6 @@
-# Runs Claude automatically on every PR (no @claude mention needed), asks it
-# to review the diff, and fails the job if any HIGH severity issue is found.
-# Requires the ANTHROPIC_API_KEY secret.
+# Runs Groq automatically on every PR (via its OpenAI-compatible chat
+# completions API), asks it to review the diff, and fails the job if any
+# HIGH severity issue is found. Requires the GROQ_API_KEY secret.
 name: Quality Gate
 
 on:
@@ -17,38 +17,58 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Claude code review
+      - name: Build review context
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "$BASE_REF" --depth=1
+          BASE="origin/$BASE_REF"
+          CHANGED_FILES=$(git diff --name-only "$BASE...HEAD")
+
+          {
+            echo "=== diff ==="
+            git diff "$BASE...HEAD"
+            for f in $CHANGED_FILES; do
+              if [ -f "$f" ]; then
+                echo
+                echo "=== $f (full file) ==="
+                cat "$f"
+              fi
+            done
+          } | head -c 150000 > context.txt
+
+          printf '%s\n' \
+            'You are a code reviewer. You are given a pull request diff and the full content of every changed file.' \
+            'Look for correctness bugs, security issues, and missing test coverage. For each issue found, assign a severity of LOW, MEDIUM, or HIGH. Also set an overall_risk for the PR as a whole.' \
+            'Respond with ONLY a JSON object of the exact shape: {"findings": [{"file": string, "line": number (optional), "severity": "LOW"|"MEDIUM"|"HIGH", "summary": string}], "overall_risk": "LOW"|"MEDIUM"|"HIGH"}. No markdown fences, no extra commentary.' \
+            > system-prompt.txt
+
+      - name: Run Groq code review
         id: review
-        uses: anthropics/claude-code-action@v1
-        with:
+        env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          prompt: |
-            Review only the changes introduced by this pull request
-            (compare against origin/${{ github.event.pull_request.base.ref }}).
-            Look for correctness bugs, security issues, and missing test
-            coverage. For each issue found, assign a severity of LOW,
-            MEDIUM, or HIGH. Also set an overall_risk for the PR as a whole.
-          claude_args: |
-            --allowedTools "Bash(git diff:*),Bash(git log:*),Read,Grep,Glob"
-            --json-schema '{"type":"object","properties":{"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"number"},"severity":{"type":"string","enum":["LOW","MEDIUM","HIGH"]},"summary":{"type":"string"}},"required":["file","severity","summary"]}},"overall_risk":{"type":"string","enum":["LOW","MEDIUM","HIGH"]}},"required":["findings","overall_risk"]}'
+        run: |
+          OUTPUT=$(bash .github/scripts/groq-chat.sh --system-file system-prompt.txt --user-file context.txt --json)
+          echo "structured_output<<GROQ_EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "GROQ_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Enforce quality gate
         run: |
           OUTPUT='${{ steps.review.outputs.structured_output }}'
 
           {
-            echo "### Claude quality gate — overall risk: $(echo "$OUTPUT" | jq -r '.overall_risk')"
+            echo "### Groq quality gate — overall risk: $(echo "$OUTPUT" | jq -r '.overall_risk // "UNKNOWN"')"
             echo
-            echo "$OUTPUT" | jq -r '.findings[] | "- **\(.severity)** `\(.file)\(if .line then ":\(.line)" else "" end)`: \(.summary)"'
+            echo "$OUTPUT" | jq -r '.findings[]? | "- **\(.severity)** `\(.file)\(if .line then ":\(.line)" else "" end)`: \(.summary)"'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          HIGH_COUNT=$(echo "$OUTPUT" | jq '[.findings[] | select(.severity == "HIGH")] | length')
+          HIGH_COUNT=$(echo "$OUTPUT" | jq '[.findings[]? | select(.severity == "HIGH")] | length')
           echo "HIGH severity findings: $HIGH_COUNT"
 
           if [ "$HIGH_COUNT" -gt 0 ]; then

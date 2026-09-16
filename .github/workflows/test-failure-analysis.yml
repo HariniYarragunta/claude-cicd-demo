@@ -1,7 +1,7 @@
-# Runs the test suite; on failure, asks Claude to read the failure log and
-# the relevant source to produce a root-cause analysis, then posts it as a
-# PR comment (or, for pushes with no PR, opens an issue). Requires the
-# ANTHROPIC_API_KEY secret.
+# Runs the test suite; on failure, asks Groq (via its OpenAI-compatible chat
+# completions API) to read the failure log and the changed source files to
+# produce a root-cause analysis, then posts it as a PR comment (or, for
+# pushes with no PR, opens an issue). Requires the GROQ_API_KEY secret.
 name: Test Failure Analysis
 
 on:
@@ -13,7 +13,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   test:
@@ -39,20 +38,45 @@ jobs:
           name: test-output-log
           path: test-output.log
 
-      - name: Analyze failure with Claude
+      - name: Build analysis context
+        if: steps.run_tests.outcome == 'failure'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            CHANGED_FILES=$(git diff --name-only "origin/$BASE_REF...HEAD")
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD 2>/dev/null || true)
+          fi
+
+          {
+            echo "=== test-output.log ==="
+            cat test-output.log
+            for f in $CHANGED_FILES; do
+              if [ -f "$f" ]; then
+                echo
+                echo "=== $f ==="
+                cat "$f"
+              fi
+            done
+          } | head -c 100000 > context.txt
+
+          printf '%s\n' \
+            'You are a CI assistant analyzing a failing test suite. You are given the test failure log and the full content of every file changed in this commit or pull request.' \
+            'Respond with ONLY a JSON object of the exact shape {"root_cause": string, "suggested_fix": string}. No markdown fences, no extra commentary.' \
+            > system-prompt.txt
+
+      - name: Analyze failure with Groq
         if: steps.run_tests.outcome == 'failure'
         id: analysis
-        uses: anthropics/claude-code-action@v1
-        with:
+        env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          prompt: |
-            The test suite failed. Read test-output.log for the failure
-            output, then read whatever source files are relevant to explain
-            why it failed. Produce a concise root-cause analysis and a
-            suggested fix. Do not modify any files.
-          claude_args: |
-            --allowedTools "Read,Grep,Glob"
-            --json-schema '{"type":"object","properties":{"root_cause":{"type":"string"},"suggested_fix":{"type":"string"}},"required":["root_cause","suggested_fix"]}'
+        run: |
+          OUTPUT=$(bash .github/scripts/groq-chat.sh --system-file system-prompt.txt --user-file context.txt --json)
+          echo "structured_output<<GROQ_EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "GROQ_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Post analysis to PR
         if: steps.run_tests.outcome == 'failure' && github.event_name == 'pull_request'
