@@ -27,7 +27,7 @@ jobs:
         id: review
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           prompt: |
             Review only the changes introduced by this pull request
             (compare against origin/${{ github.event.pull_request.base.ref }}).

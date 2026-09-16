@@ -31,7 +31,7 @@ jobs:
         id: notes
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           prompt: |
             Write user-facing release notes for tag ${{ steps.prev_tag.outputs.current_tag }}.
             Inspect the commits with:
