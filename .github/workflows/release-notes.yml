@@ -1,6 +1,7 @@
-# On every tag push matching v*, asks Claude to summarize the commits since
-# the previous tag into user-facing release notes, then publishes a GitHub
-# Release with them. Requires the ANTHROPIC_API_KEY secret.
+# On every tag push matching v*, asks Groq (via its OpenAI-compatible chat
+# completions API) to summarize the commits since the previous tag into
+# user-facing release notes, then publishes a GitHub Release with them.
+# Requires the GROQ_API_KEY secret.
 name: Release Notes
 
 on:
@@ -27,20 +28,42 @@ jobs:
           echo "current_tag=$CURRENT_TAG" >> "$GITHUB_OUTPUT"
           echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Build release notes context
+        env:
+          CURRENT_TAG: ${{ steps.prev_tag.outputs.current_tag }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.prev_tag }}
+        run: |
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="$PREV_TAG..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          {
+            echo "=== commits ==="
+            git log "$RANGE" --pretty=format:'%h %s' --no-merges
+            echo
+            echo
+            echo "=== changed files ==="
+            git diff --stat "$RANGE" 2>/dev/null || true
+          } | head -c 100000 > context.txt
+
+          printf '%s\n' \
+            "Write user-facing release notes for tag $CURRENT_TAG." \
+            'You are given the commit log and a summary of changed files since the previous tag.' \
+            'Group the changes under "Features", "Fixes", and "Other" headings (omit empty groups). Keep it concise and skip merge commits.' \
+            'Respond with ONLY a JSON object of the exact shape {"title": string, "body_markdown": string}. No markdown fences around the JSON itself, no extra commentary.' \
+            > system-prompt.txt
+
       - name: Generate release notes
         id: notes
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            Write user-facing release notes for tag ${{ steps.prev_tag.outputs.current_tag }}.
-            Inspect the commits with:
-              git log ${{ steps.prev_tag.outputs.prev_tag && format('{0}..HEAD', steps.prev_tag.outputs.prev_tag) || 'HEAD' }} --oneline
-            Group the changes under "Features", "Fixes", and "Other" headings
-            (omit empty groups). Keep it concise and skip merge commits.
-          claude_args: |
-            --allowedTools "Bash(git log:*),Bash(git show:*),Read"
-            --json-schema {"type":"object","properties":{"title":{"type":"string"},"body_markdown":{"type":"string"}},"required":["title","body_markdown"]}
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          OUTPUT=$(bash .github/scripts/groq-chat.sh --system-file system-prompt.txt --user-file context.txt --json)
+          echo "structured_output<<GROQ_EOF" >> "$GITHUB_OUTPUT"
+          echo "$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "GROQ_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         env:

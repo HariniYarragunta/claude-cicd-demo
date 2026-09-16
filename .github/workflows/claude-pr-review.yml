@@ -1,5 +1,9 @@
 # Responds whenever someone mentions @claude in a PR/issue comment, a PR
-# review, or a PR review comment. Requires the ANTHROPIC_API_KEY secret.
+# review, or a PR review comment. Requires the GROQ_API_KEY secret.
+#
+# Note: unlike the previous claude-code-action-based version, this can only
+# read the PR diff and changed files and post a text reply — it cannot make
+# code changes or push commits on request.
 name: Claude PR Review (on-demand)
 
 on:
@@ -24,11 +28,61 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-      id-token: write
     steps:
       - uses: actions/checkout@v4
-
-      - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          trigger_phrase: "@claude"
+          fetch-depth: 0
+
+      - name: Determine PR number
+        id: pr
+        env:
+          PR_NUMBER_FROM_EVENT: ${{ github.event.pull_request.number }}
+          ISSUE_NUMBER_FROM_EVENT: ${{ github.event.issue.number }}
+        run: |
+          echo "number=${PR_NUMBER_FROM_EVENT:-$ISSUE_NUMBER_FROM_EVENT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build response context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+        run: |
+          REQUEST_TEXT="${COMMENT_BODY:-$REVIEW_BODY}"
+
+          gh pr diff "$PR_NUMBER" > pr.diff || true
+          CHANGED_FILES=$(gh pr diff "$PR_NUMBER" --name-only 2>/dev/null || true)
+
+          {
+            echo "=== request ==="
+            echo "$REQUEST_TEXT"
+            echo
+            echo "=== pr diff ==="
+            cat pr.diff
+            for f in $CHANGED_FILES; do
+              if [ -f "$f" ]; then
+                echo
+                echo "=== $f (full file) ==="
+                cat "$f"
+              fi
+            done
+          } | head -c 100000 > context.txt
+
+          printf '%s\n' \
+            'You are a coding assistant responding to a mention in a GitHub pull request comment.' \
+            'You are given the request text, the PR diff, and the full content of changed files.' \
+            'Reply directly and concisely in Markdown, as the comment that will be posted back to GitHub as-is. Do not wrap the reply in JSON.' \
+            > system-prompt.txt
+
+      - name: Ask Groq
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          bash .github/scripts/groq-chat.sh --system-file system-prompt.txt --user-file context.txt > reply.md
+
+      - name: Post reply
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body-file reply.md
